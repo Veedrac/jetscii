@@ -28,8 +28,9 @@
 //! assert_eq!(&colors, &["red", "blue", "green"]);
 //! ```
 
+pub mod bytes;
+
 use std::cmp::min;
-use std::fmt;
 use std::str::pattern::{Pattern,Searcher,SearchStep};
 
 trait PackedCompareOperation {
@@ -239,18 +240,16 @@ macro_rules! ascii_chars {
                         $c8, $c9, $c10, $c11, $c12, $c13, $c14, $c15));
 }
 
-const MAXBYTES: u8 = 16;
+const MAX_BYTES: u8 = 16;
 
 /// 8 ascii-only bytes
 const ASCII_WORD_MASK: u64 = 0x7f7f7f7f7f7f7f7f;
 
 /// Searches a string for a set of ASCII characters. Up to 16
 /// characters may be used.
-#[derive(Copy,Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct AsciiChars {
-    needle: u64,
-    needle_hi: u64,
-    count: u8,
+    inner: bytes::Bytes,
 }
 
 impl AsciiChars {
@@ -261,18 +260,17 @@ impl AsciiChars {
     }
 
     #[inline]
-    /// Create an AsciiChars with ascii bytes from `lo`, `hi`,
-    /// with `count` bytes being used.
+    /// Create an AsciiChars with the ASCII bytes from `lo` and `hi`,
+    /// using only the first `count` bytes.
     pub const fn from_words(lo: u64, hi: u64, count: usize) -> AsciiChars {
-        // this is memory safe even if the user may specify a count > 16 here
-        // (because the pcmpestri instruction will saturate it at 16)
-        //
-        // However, specifying non-ascii bytes will result in non-ascii
-        // indices being matched to, so we have to avoid this.
+        // Specifying non-ASCII bytes can result in non-ASCII
+        // indices being matched, so ignore those.
         AsciiChars {
-            needle: lo & ASCII_WORD_MASK,
-            needle_hi: hi & ASCII_WORD_MASK,
-            count: count as u8,
+            inner: bytes::Bytes::from_words(
+                lo & ASCII_WORD_MASK,
+                hi & ASCII_WORD_MASK,
+                count,
+            ),
         }
     }
 
@@ -284,12 +282,7 @@ impl AsciiChars {
     /// - If you add a non-ASCII byte.
     pub fn push(&mut self, byte: u8) {
         assert!(byte < 128);
-        assert!(self.count < MAXBYTES);
-        self.needle_hi <<= 8;
-        self.needle_hi |= self.needle >> (64 - 8);
-        self.needle <<= 8;
-        self.needle |= byte as u64;
-        self.count += 1;
+        self.inner.push(byte);
     }
 
     /// Builds a searcher with a fallback implementation for when the
@@ -298,68 +291,14 @@ impl AsciiChars {
     pub fn with_fallback<F>(self, fallback: F) -> AsciiCharsWithFallback<F>
         where F: Fn(u8) -> bool
     {
-        AsciiCharsWithFallback { inner: self, fallback: fallback }
+        AsciiCharsWithFallback { inner: self.inner.with_fallback(fallback) }
     }
 
-    /// Find the index of the first character in the set.
+    /// Find the first index of a character in the set.
     #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
     #[inline]
     pub fn find(self, haystack: &str) -> Option<usize> {
-        UnalignedByteSliceHandler { operation: self }.find(haystack.as_bytes())
-    }
-}
-
-impl fmt::Debug for AsciiChars {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "AsciiChars {{ lo: 0x{:016x}, hi: 0x{:016x}, count: {} }}",
-               self.needle, self.needle_hi, self.count)
-    }
-}
-
-#[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-impl PackedCompareOperation for AsciiChars {
-    unsafe fn initial(&self, ptr: *const u8, offset: usize, len: usize) -> u64 {
-        let matching_bytes;
-
-        asm!("movlhps $2, $1
-              pcmpestrm $$0, ($3), $1"
-             : // output operands
-             "={xmm0}"(matching_bytes)
-             : // input operands
-             "x"(self.needle),
-             "x"(self.needle_hi),
-             "r"(ptr),
-             "{rdx}"(offset + len), // saturates at 16
-             "{rax}"(self.count as u64)
-             : // clobbers
-             "cc"
-             : // options
-        );
-
-        matching_bytes
-    }
-
-    unsafe fn body(&self, ptr: *const u8, offset: usize, len: usize) -> u32 {
-        let res;
-
-        asm!("# Move low word of $2 to high word of $1
-              movlhps $2, $1
-              pcmpestri $$0, ($3, $4), $1"
-             : // output operands
-             "={ecx}"(res)
-             : // input operands
-             "x"(self.needle),
-             "x"(self.needle_hi),
-             "r"(ptr),
-             "r"(offset)
-             "{rdx}"(len),              // haystack length
-             "{rax}"(self.count as u64) // needle length
-             : // clobbers
-             "cc"
-             : // options
-         );
-
-        res
+        self.inner.position(haystack.as_bytes())
     }
 }
 
@@ -368,23 +307,16 @@ impl PackedCompareOperation for AsciiChars {
 ///
 /// Although this implementation is a bit ungainly, Rust's closure
 /// inlining is top-notch and provides the best speed.
-#[derive(Debug,Copy,Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct AsciiCharsWithFallback<F> {
-    inner: AsciiChars,
-    fallback: F,
+    inner: bytes::BytesWithFallback<F>,
 }
 
 unsafe impl<F> DirectSearch for AsciiCharsWithFallback<F>
     where F: Fn(u8) -> bool
 {
-    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
     fn find(&self, haystack: &str) -> Option<usize> {
-        self.inner.find(haystack)
-    }
-
-    #[cfg(not(all(feature = "unstable", target_arch = "x86_64")))]
-    fn find(&self, haystack: &str) -> Option<usize> {
-        haystack.as_bytes().iter().cloned().position(&self.fallback)
+        self.inner.position(haystack.as_bytes())
     }
 
     fn len(&self) -> usize { 1 }
@@ -396,9 +328,9 @@ impl<'a, F> Pattern<'a> for AsciiCharsWithFallback<F>
     type Searcher = DirectSearcher<'a, AsciiCharsWithFallback<F>>;
 
     fn into_searcher(self, haystack: &'a str) -> DirectSearcher<'a, AsciiCharsWithFallback<F>> {
-        // Assert that we are searching for only ascii
-        debug_assert!(self.inner.needle & !ASCII_WORD_MASK == 0);
-        debug_assert!(self.inner.needle_hi & !ASCII_WORD_MASK == 0);
+        // // Assert that we are searching for only ascii
+        // debug_assert!(self.inner.needle & !ASCII_WORD_MASK == 0);
+        // debug_assert!(self.inner.needle_hi & !ASCII_WORD_MASK == 0);
 
         DirectSearcher { haystack: haystack, offset: 0, direct_search: self }
     }
@@ -624,7 +556,7 @@ mod test {
     #[test]
     fn works_as_find_does_for_up_to_16_characters() {
         fn prop(s: String, v: Vec<AsciiChar>) -> bool {
-            let n = cmp::min(super::MAXBYTES as usize, v.len());
+            let n = cmp::min(super::MAX_BYTES as usize, v.len());
             let mut searcher = AsciiChars::new();
             let mut chars = ['\0'; 16];
             for (index, &c) in v.iter().take(n).enumerate() {
