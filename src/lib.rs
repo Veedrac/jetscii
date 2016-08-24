@@ -254,7 +254,7 @@ const ASCII_WORD_MASK: u64 = 0x7f7f7f7f7f7f7f7f;
 /// characters may be used.
 #[derive(Copy,Clone)]
 pub struct AsciiChars {
-    needle: u64,
+    needle_lo: u64,
     needle_hi: u64,
     count: u8,
 }
@@ -276,7 +276,7 @@ impl AsciiChars {
         // However, specifying non-ascii bytes will result in non-ascii
         // indices being matched to, so we have to avoid this.
         AsciiChars {
-            needle: lo & ASCII_WORD_MASK,
+            needle_lo: lo & ASCII_WORD_MASK,
             needle_hi: hi & ASCII_WORD_MASK,
             count: count as u8,
         }
@@ -292,9 +292,9 @@ impl AsciiChars {
         assert!(byte < 128);
         assert!(self.count < MAXBYTES);
         self.needle_hi <<= 8;
-        self.needle_hi |= self.needle >> (64 - 8);
-        self.needle <<= 8;
-        self.needle |= byte as u64;
+        self.needle_hi |= self.needle_lo >> (64 - 8);
+        self.needle_lo <<= 8;
+        self.needle_lo |= byte as u64;
         self.count += 1;
     }
 
@@ -322,7 +322,7 @@ impl fmt::Debug for AsciiChars {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f,
                "AsciiChars {{ lo: 0x{:016x}, hi: 0x{:016x}, count: {} }}",
-               self.needle,
+               self.needle_lo,
                self.needle_hi,
                self.count)
     }
@@ -338,7 +338,7 @@ impl PackedCompareOperation for AsciiChars {
              : // output operands
              "={xmm0}"(matching_bytes)
              : // input operands
-             "x"(self.needle),
+             "x"(self.needle_lo),
              "x"(self.needle_hi),
              "r"(ptr),
              "{rdx}"(offset + len), // saturates at 16
@@ -360,7 +360,7 @@ impl PackedCompareOperation for AsciiChars {
              : // output operands
              "={ecx}"(res)
              : // input operands
-             "x"(self.needle),
+             "x"(self.needle_lo),
              "x"(self.needle_hi),
              "r"(ptr),
              "r"(offset)
@@ -411,7 +411,7 @@ impl<'a, F> Pattern<'a> for AsciiCharsWithFallback<F>
 
     fn into_searcher(self, haystack: &'a str) -> DirectSearcher<'a, AsciiCharsWithFallback<F>> {
         // Assert that we are searching for only ascii
-        debug_assert!(self.inner.needle & !ASCII_WORD_MASK == 0);
+        debug_assert!(self.inner.needle_lo & !ASCII_WORD_MASK == 0);
         debug_assert!(self.inner.needle_hi & !ASCII_WORD_MASK == 0);
 
         DirectSearcher {
