@@ -247,49 +247,49 @@ macro_rules! ascii_chars {
 
 const MAXBYTES: u8 = 16;
 
-/// 8 ascii-only bytes
-const ASCII_WORD_MASK: u64 = 0x7f7f7f7f7f7f7f7f;
-
-/// Searches a string for a set of ASCII characters. Up to 16
-/// characters may be used.
+/// Searches a slice for a set of up to 16 bytes.
 #[derive(Copy,Clone)]
-pub struct AsciiChars {
+pub struct Bytes {
     needle_lo: u64,
     needle_hi: u64,
     count: u8,
 }
 
-impl AsciiChars {
+impl Bytes {
     #[inline]
-    /// Create an empty AsciiChars
-    pub const fn new() -> AsciiChars {
+    /// Create an empty Bytes
+    pub const fn new() -> Bytes {
         Self::from_words(0, 0, 0)
     }
 
     #[inline]
-    /// Create an AsciiChars with ascii bytes from `lo`, `hi`,
-    /// with `count` bytes being used.
-    pub const fn from_words(lo: u64, hi: u64, count: usize) -> AsciiChars {
+    /// Create a Bytes with bytes from `lo`, `hi`, with `count` bytes
+    /// being used.
+    pub const fn from_words(lo: u64, hi: u64, count: usize) -> Bytes {
         // this is memory safe even if the user may specify a count > 16 here
         // (because the pcmpestri instruction will saturate it at 16)
-        //
-        // However, specifying non-ascii bytes will result in non-ascii
-        // indices being matched to, so we have to avoid this.
-        AsciiChars {
-            needle_lo: lo & ASCII_WORD_MASK,
-            needle_hi: hi & ASCII_WORD_MASK,
+        Bytes {
+            needle_lo: lo,
+            needle_hi: hi,
             count: count as u8,
         }
     }
 
-    /// Add a new ASCII character to the set to search for.
+    /// Create a Bytes using the first 16 bytes from the slices
+    pub fn from_slice(bytes: &[u8]) -> Bytes {
+        let mut ac = Bytes::new();
+        for &b in bytes.iter().take(16) {
+            ac.push(b)
+        }
+        ac
+    }
+
+    /// Add a new byte to the set to search for.
     ///
     /// ### Panics
     ///
     /// - If you add more than 16 characters.
-    /// - If you add a non-ASCII byte.
-    pub fn push(&mut self, byte: u8) {
-        assert!(byte < 128);
+    fn push(&mut self, byte: u8) {
         assert!(self.count < MAXBYTES);
         self.needle_hi <<= 8;
         self.needle_hi |= self.needle_lo >> (64 - 8);
@@ -298,30 +298,18 @@ impl AsciiChars {
         self.count += 1;
     }
 
-    /// Builds a searcher with a fallback implementation for when the
-    /// optimized version is not available. The fallback should search
-    /// for the **exact** same set of characters.
-    pub fn with_fallback<F>(self, fallback: F) -> AsciiCharsWithFallback<F>
-        where F: Fn(u8) -> bool
-    {
-        AsciiCharsWithFallback {
-            inner: self,
-            fallback: fallback,
-        }
-    }
-
-    /// Find the index of the first character in the set.
+    /// Find the index of the first byte in the set.
     #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
     #[inline]
-    pub fn find(self, haystack: &str) -> Option<usize> {
-        UnalignedByteSliceHandler { operation: self }.find(haystack.as_bytes())
+    pub fn find(self, haystack: &[u8]) -> Option<usize> {
+        UnalignedByteSliceHandler { operation: self }.find(haystack)
     }
 }
 
-impl fmt::Debug for AsciiChars {
+impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f,
-               "AsciiChars {{ lo: 0x{:016x}, hi: 0x{:016x}, count: {} }}",
+               "Bytes {{ lo: 0x{:016x}, hi: 0x{:016x}, count: {} }}",
                self.needle_lo,
                self.needle_hi,
                self.count)
@@ -329,7 +317,7 @@ impl fmt::Debug for AsciiChars {
 }
 
 #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-impl PackedCompareOperation for AsciiChars {
+impl PackedCompareOperation for Bytes {
     unsafe fn initial(&self, ptr: *const u8, offset: usize, len: usize) -> u64 {
         let matching_bytes;
 
@@ -375,6 +363,85 @@ impl PackedCompareOperation for AsciiChars {
     }
 }
 
+/// 8 ascii-only bytes
+const ASCII_WORD_MASK: u64 = 0x7f7f7f7f7f7f7f7f;
+
+/// Searches a string for a set of ASCII characters. Up to 16
+/// characters may be used.
+#[derive(Copy,Clone)]
+pub struct AsciiChars {
+    // needle_lo: u64,
+    // needle_hi: u64,
+    // count: u8,
+    bytes: Bytes,
+}
+
+impl AsciiChars {
+    #[inline]
+    /// Create an empty AsciiChars
+    pub const fn new() -> AsciiChars {
+        Self::from_words(0, 0, 0)
+    }
+
+    #[inline]
+    /// Create an AsciiChars with ascii bytes from `lo`, `hi`,
+    /// with `count` bytes being used.
+    pub const fn from_words(lo: u64, hi: u64, count: usize) -> AsciiChars {
+        // this is memory safe even if the user may specify a count > 16 here
+        // (because the pcmpestri instruction will saturate it at 16)
+        //
+        // However, specifying non-ascii bytes will result in non-ascii
+        // indices being matched to, so we have to avoid this.
+        AsciiChars {
+            bytes: Bytes::from_words(
+                lo & ASCII_WORD_MASK,
+                hi & ASCII_WORD_MASK,
+                count,
+            ),
+        }
+    }
+
+    /// Add a new ASCII character to the set to search for.
+    ///
+    /// ### Panics
+    ///
+    /// - If you add more than 16 characters.
+    /// - If you add a non-ASCII byte.
+    pub fn push(&mut self, byte: u8) {
+        assert!(byte < 128);
+        self.bytes.push(byte);
+    }
+
+    /// Builds a searcher with a fallback implementation for when the
+    /// optimized version is not available. The fallback should search
+    /// for the **exact** same set of characters.
+    pub fn with_fallback<F>(self, fallback: F) -> AsciiCharsWithFallback<F>
+        where F: Fn(u8) -> bool
+    {
+        AsciiCharsWithFallback {
+            inner: self,
+            fallback: fallback,
+        }
+    }
+
+    /// Find the index of the first character in the set.
+    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
+    #[inline]
+    pub fn find(self, haystack: &str) -> Option<usize> {
+        self.bytes.find(haystack.as_bytes())
+    }
+}
+
+impl fmt::Debug for AsciiChars {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,
+               "AsciiChars {{ lo: 0x{:016x}, hi: 0x{:016x}, count: {} }}",
+               self.bytes.needle_lo,
+               self.bytes.needle_hi,
+               self.bytes.count)
+    }
+}
+
 /// Provides a hook for a user-supplied fallback implementation, used
 /// when the optimized instructions are not available.
 ///
@@ -411,8 +478,8 @@ impl<'a, F> Pattern<'a> for AsciiCharsWithFallback<F>
 
     fn into_searcher(self, haystack: &'a str) -> DirectSearcher<'a, AsciiCharsWithFallback<F>> {
         // Assert that we are searching for only ascii
-        debug_assert!(self.inner.needle_lo & !ASCII_WORD_MASK == 0);
-        debug_assert!(self.inner.needle_hi & !ASCII_WORD_MASK == 0);
+        debug_assert!(self.inner.bytes.needle_lo & !ASCII_WORD_MASK == 0);
+        debug_assert!(self.inner.bytes.needle_hi & !ASCII_WORD_MASK == 0);
 
         DirectSearcher {
             haystack: haystack,
