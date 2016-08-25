@@ -4,7 +4,8 @@
 #![cfg_attr(test, feature(test))]
 
 //! A tiny library to efficiently search strings for substrings or
-//! sets of ASCII characters.
+//! sets of ASCII characters. Low level operations against byte slices
+//! are also available.
 //!
 //! ## Examples
 //!
@@ -299,6 +300,17 @@ impl Bytes {
     }
 
     /// Find the index of the first byte in the set.
+    ///
+    /// # Examples
+    /// ```
+    /// use jetscii::Bytes;
+    ///
+    /// let raw_data: &[u8] = &[0x00, 0x07, 0x01, 0x08, 0x02];
+    /// let bytes = Bytes::from_slice(&[0x07, 0x08]);
+    /// assert_eq!(Some(1), bytes.find(raw_data));
+    /// assert_eq!(Some(1), bytes.find(&raw_data[2..]));
+    /// assert_eq!(None, bytes.find(&raw_data[4..]));
+    /// ```
     #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
     #[inline]
     pub fn find(self, haystack: &[u8]) -> Option<usize> {
