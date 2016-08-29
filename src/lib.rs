@@ -38,6 +38,12 @@ trait PackedCompareOperation {
     unsafe fn initial(&self, ptr: *const u8, offset: usize, len: usize) -> u64;
     // Returns an index
     unsafe fn body(&self, ptr: *const u8, offset: usize, len: usize) -> u32;
+
+    #[allow(unused_variables)]
+    #[inline(always)]
+    unsafe fn body_fast(&self, ptr: *const u8, offset: usize, len: usize) -> Option<(u32, usize)> {
+        None
+    }
 }
 
 #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
@@ -90,6 +96,20 @@ impl<T> UnalignedByteSliceHandler<T>
                     offset = 16;
                     len -= length_of_leading_slice;
                 }
+            }
+        }
+
+        let len_sixteen = (len / 16) * 16;
+        if len_sixteen != 0 {
+            let x = unsafe { self.operation.body_fast(ptr, offset, len_sixteen) };
+            if let Some((res, new_offset)) = x {
+                offset = new_offset;
+
+                if res != 16 {
+                    return Some(res as usize + offset - initial_offset);
+                }
+
+                len -= len_sixteen;
             }
         }
 
@@ -373,6 +393,48 @@ impl PackedCompareOperation for Bytes {
 
         res
     }
+
+   #[inline]
+    unsafe fn body_fast(&self, ptr: *const u8, mut offset: usize, len: usize) -> Option<(u32, usize)> {
+        let res;
+
+// needs 16-byte chunk
+
+        debug_assert!(len % 16 == 0, "Expects 16-byte chunks");
+        debug_assert!(len > 0, "Expects at least one chunk");
+
+
+        asm!("# Rebuild the needle from parts
+              # - move low word of $2 to high word of $1
+              movlhps $3, $2
+1:
+              # pcmpestri control byte, (pointer, offset), needle
+              pcmpestri $$0, ($4, $1), $2
+              # Carry flag is set when an index is found
+              jc 2f
+              addq $$16, $1
+              subq $$16, $5
+              jnz 1b
+2:
+"
+             : // output operands
+             "={ecx}"(res),
+             "+r"(offset)
+             : // input operands
+             "x"(self.needle_lo),
+             "x"(self.needle_hi),
+             "r"(ptr),
+             "{rdx}"(len),              // haystack length
+             "{rax}"(self.count as u64) // needle length
+             : // clobbers
+             "rcx",
+             "memory",
+             "cc"
+             : // options
+         );
+
+        Some((res, offset))
+    }
 }
 
 /// 8 ascii-only bytes
@@ -584,7 +646,7 @@ unsafe impl<'a> DirectSearch for Substring<'a> {
     fn find(&self, haystack: &str) -> Option<usize> {
         // It's ok to treat the haystack as a bag of bytes because the
         // needle is guaranteed to only match complete UTF-8
-        // characters. Whenever a match is found, we double-check the
+        // characters. Whenever a match is complete, we double-check the
         // match position with the complete needle.
 
         let needle = self.raw.as_bytes();
